@@ -49,7 +49,7 @@ pip install -r requirements.txt
 ```
 4) Start program
 ```bash 
-python3 ok_ru.py
+python3 DomainShadow.py
 ```
 
 ## 🖥️ Użycie
