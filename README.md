@@ -1,4 +1,4 @@
-# DomainShadow 🕵️‍♂️
+# DomainShadow 🕵️‍♂️ beta
 
 **Advanced OSINT Domain Analyzer & Risk Scorer**
 
