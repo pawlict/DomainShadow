@@ -8,8 +8,8 @@
 
 ---
 
-**DomainShadow** to zaawansowane narzędzie OSINT (Open Source Intelligence) napisane w Pythonie, służące do głębokiej analizy domen internetowych.  
-Agreguje dane z wielu źródeł, ocenia ryzyko bezpieczeństwa i generuje profesjonalne raporty PDF z pełną obsługą języka polskiego (UTF-8).
+**DomainShadow** to narzędzie, służące do  analizy domen internetowych.  
+Agreguje dane z wielu źródeł, ocenia ryzyko bezpieczeństwa i generuje  raporty PDF..
 
 ---
 
