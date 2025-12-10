@@ -81,7 +81,7 @@ Raport PDF zawiera:
 
 ### 1 Aktualizacja systemu
 ```bash
-sudo apt-get update
+sudo apt-get update -y
 ```
 ### 2 Instalacja pakietów
 ```bash
