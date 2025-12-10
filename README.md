@@ -89,8 +89,8 @@ sudo apt install -y python3 python3-venv python3-tk firefox-esr geckodriver
 ```
 ### 3 Instalacja programu
 ```bash
-mkdir -p ~/projekts
-cd ~/projekts
+mkdir -p ~/projects
+cd ~/projects
 git clone https://github.com/pawlict/DomainShadow.git
 cd DomainShadow
 
