@@ -79,9 +79,28 @@ Raport PDF zawiera:
 
 ## 🚀 Instalacja
 
-### 1️⃣ Aktualizacja systemu
+### 1 Aktualizacja systemu
 ```bash
 sudo apt-get update
-
+```
+### 2 Instalacja pakietów
+```bash
 sudo apt install -y python3 python3-venv python3-tk firefox-esr geckodriver
+```
+### 3 Instalacja programu
+```bash
+mkdir -p ~/projekts
+cd ~/projekts
+git clone https://github.com/pawlict/DomainShadow.git
+cd DomainShadow
 
+python3 -m venv .DomainShadow
+source .DomainShadow/bin/activate
+
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+### 4 Uruchomienie programu
+```bash
+python3 DomainShadow.py
+```
