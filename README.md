@@ -26,19 +26,31 @@
     *   **Pełna obsługa polskich znaków (UTF-8)** (brak "czarnych pól").
     *   Sekcje z legendą i wyjaśnieniami dla nietechnicznych odbiorców.
 
-## 🚀 Instalacja
+##  Instalacja
 
-1.  Sklonuj repozytorium:
-    ```
-    git clone https://github.com/pawlict/DomainShadow.git
-    cd DomainShadow
-    ```
+## 🚀 Quick Start
+1) System update && upgrade
+```bash 
+sudo apt-get update && sudo apt-get upgrade -y
+```
+2) System packages
+```bash 
+sudo apt install -y 
+```
 
-2.  Zainstaluj wymagane biblioteki:
-    ```
-    pip install requests python-whois dnspython reportlab
-    ```
-    *(Opcjonalnie dla screenshotów: `pip install selenium`)*
+3) Get the code inside venv folder
+```bash
+mkdir -p ~/projekts
+git clone https://github.com/pawlict/DomainShadow.git
+python3 -m venv .DomainShadow
+source .DomainShadow/bin/activate
+cd DomainShadow
+pip install -r requirements.txt
+```
+4) Start program
+```bash 
+python3 ok_ru.py
+```
 
 ## 🖥️ Użycie
 
