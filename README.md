@@ -30,7 +30,7 @@
 
 1.  Sklonuj repozytorium:
     ```
-    git clone https://github.com/twoj-nick/DomainShadow.git
+    git clone https://github.com/pawlict/DomainShadow.git
     cd DomainShadow
     ```
 
