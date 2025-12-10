@@ -81,4 +81,7 @@ Raport PDF zawiera:
 
 ### 1️⃣ Aktualizacja systemu
 ```bash
-sudo apt-get update && sudo apt-get upgrade -y
+sudo apt-get update
+
+sudo apt install -y python3 python3-venv python3-tk firefox-esr geckodriver
+
