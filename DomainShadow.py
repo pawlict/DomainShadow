@@ -19,6 +19,11 @@ try:
 except ImportError:
     dns = None
 
+try:
+    from ipwhois import IPWhois
+except ImportError:
+    IPWhois = None
+
 import requests
 
 # PDF – reportlab
@@ -26,6 +31,8 @@ try:
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as pdf_canvas
     from reportlab.lib.utils import ImageReader
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
@@ -40,11 +47,47 @@ try:
 except ImportError:
     SELENIUM_AVAILABLE = False
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.5.1"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".osint_domena_config.json")
 
+PDF_FONT_NAME = "Helvetica"
+PDF_FONT_REGISTERED = False
 
-# ---------- POMOCNICZE FUNKCJE ----------
+
+# ---------- POMOCNICZE FUNKCJE / PDF FONT ----------
+
+def ensure_pdf_font_registered():
+    """
+    Rejestruje font TrueType z obsługą polskich znaków (np. DejaVuSans),
+    jeśli jest dostępny w systemie. W razie niepowodzenia zostaje Helvetica.
+    """
+    global PDF_FONT_REGISTERED, PDF_FONT_NAME
+
+    if not REPORTLAB_AVAILABLE or PDF_FONT_REGISTERED:
+        return
+
+    candidate_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+
+    for path in candidate_paths:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont("DejaVuSans", path))
+                PDF_FONT_NAME = "DejaVuSans"
+                PDF_FONT_REGISTERED = True
+                return
+            except Exception as e:
+                print("Błąd rejestracji fontu", path, ":", e)
+
+    # Fallback – zostaje Helvetica (może dalej mieć problemy z diakrytykami)
+    PDF_FONT_REGISTERED = True
+    PDF_FONT_NAME = "Helvetica"
+
+
+# ---------- POMOCNICZE FUNKCJE OGÓLNE ----------
 
 def normalize_domain(domain: str) -> str:
     """
@@ -52,18 +95,11 @@ def normalize_domain(domain: str) -> str:
     i zostawia samą domenę.
     """
     d = domain.strip().lower()
-
-    # Usuń protokół
     d = re.sub(r'^https?://', '', d)
-
-    # Usuń wszystko po pierwszym ukośniku
     if '/' in d:
         d = d.split('/', 1)[0]
-
-    # Usuń port, jeśli jest (np. example.com:8080)
     if ':' in d:
         d = d.split(':', 1)[0]
-
     return d
 
 
@@ -111,7 +147,6 @@ def dns_lookup(domain: str) -> dict:
         "errors": []
     }
 
-    # Jeśli brak dnspython, używamy tylko socket do A/AAAA
     if dns is None:
         try:
             info = socket.getaddrinfo(domain, None)
@@ -127,7 +162,6 @@ def dns_lookup(domain: str) -> dict:
             result["errors"].append(f"DNS/socket error: {e}")
         return result
 
-    # Z dnspython – bardziej rozbudowane
     resolver = dns.resolver.Resolver()
 
     def _query(record_type: str):
@@ -162,6 +196,7 @@ def whois_lookup(domain: str) -> dict:
         "registrar": data.get("registrar"),
         "creation_date": data.get("creation_date"),
         "expiration_date": data.get("expiration_date"),
+        "updated_date": data.get("updated_date"),
         "name_servers": data.get("name_servers"),
         "emails": data.get("emails"),
         "raw": str(data)
@@ -201,25 +236,53 @@ def http_check(domain: str) -> dict:
 def check_wayback_archive(domain: str) -> dict:
     """
     Sprawdza, czy strona ma kopie w Internet Archive (Wayback Machine)
-    za pomocą Availability API.
+    za pomocą CDX API – zwraca pierwszą i ostatnią znaną kopię.
     """
-    url = "https://archive.org/wayback/available"
-    target = "http://" + domain
+    base_cdx = "http://web.archive.org/cdx/search/cdx"
+    target = f"http://{domain}/"
+
+    def _query(sort_order: str) -> Optional[dict]:
+        params = {
+            "url": target,
+            "output": "json",
+            "filter": "statuscode:200",
+            "limit": "1",
+            "from": "1996",
+            "to": "2100",
+            "sort": sort_order,
+        }
+        r = requests.get(base_cdx, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        # Pierwszy wiersz to nagłówki
+        if not isinstance(data, list) or len(data) < 2:
+            return None
+        row = data[1]
+        # [urlkey, timestamp, original, mimetype, statuscode, digest, length]
+        if len(row) < 3:
+            return None
+        return {
+            "timestamp": row[1],
+            "original": row[2]
+        }
+
     try:
-        resp = requests.get(url, params={"url": target}, timeout=10)
-        data = resp.json()
-        archived_snapshots = data.get("archived_snapshots", {})
-        closest = archived_snapshots.get("closest")
-        if closest:
-            return {
-                "available": True,
-                "archive_url": closest.get("url"),
-                "timestamp": closest.get("timestamp"),
-                "status": closest.get("status")
-            }
-        return {"available": False}
+        first = _query("ascending")
+        last = _query("descending")
+        if not first and not last:
+            return {"available": False}
+
+        result = {"available": True}
+        if first:
+            result["first_timestamp"] = first["timestamp"]
+            result["first_url"] = f"http://web.archive.org/web/{first['timestamp']}/{first['original']}"
+        if last:
+            result["last_timestamp"] = last["timestamp"]
+            result["last_url"] = f"http://web.archive.org/web/{last['timestamp']}/{last['original']}"
+        return result
     except Exception as e:
-        return {"error": f"Wayback error: {e}"}
+        return {"error": f"Wayback CDX error: {e}"}
 
 
 def check_google_cache(domain: str) -> dict:
@@ -282,6 +345,89 @@ def shodan_lookup(ip: str, api_key: str) -> dict:
         return {"error": f"Wyjątek przy zapytaniu do Shodan: {e}"}
 
 
+def ip_whois_lookup(first_ip: str) -> dict:
+    """
+    IP/Network WHOIS (inetnum) – zakres adresów, organizacja, telefony, adresy, abuse@ itd.
+    Używa biblioteki ipwhois (RDAP).
+    """
+    if IPWhois is None:
+        return {"error": "Brak biblioteki 'ipwhois'. Zainstaluj: pip install ipwhois"}
+
+    try:
+        obj = IPWhois(first_ip)
+        data = obj.lookup_rdap(depth=1)
+    except Exception as e:
+        return {"error": f"IPWhois error: {e}"}
+
+    network = data.get("network") or {}
+    inet_info = {
+        "cidr": network.get("cidr"),
+        "start_address": network.get("start_address"),
+        "end_address": network.get("end_address"),
+        "name": network.get("name"),
+        "country": network.get("country"),
+        "remarks": network.get("remarks"),
+    }
+
+    objects = data.get("objects") or {}
+    phones = set()
+    addresses = set()
+    emails = set()
+    abuse_emails = set()
+
+    for _, odata in objects.items():
+        contact = odata.get("contact") or {}
+        roles = odata.get("roles") or []
+
+        phone = contact.get("phone")
+        if isinstance(phone, list):
+            for p in phone:
+                if p:
+                    phones.add(str(p))
+        elif phone:
+            phones.add(str(phone))
+
+        addr = contact.get("address")
+        if isinstance(addr, list):
+            for a in addr:
+                if isinstance(a, dict):
+                    v = a.get("value") or str(a)
+                    addresses.add(v)
+                elif a:
+                    addresses.add(str(a))
+        elif addr:
+            if isinstance(addr, dict):
+                addresses.add(addr.get("value") or str(addr))
+            else:
+                addresses.add(str(addr))
+
+        email = contact.get("email")
+        if isinstance(email, list):
+            for e in email:
+                if e:
+                    emails.add(str(e))
+        elif email:
+            emails.add(str(email))
+
+        if any("abuse" in (r or "").lower() for r in roles):
+            # wszystko z tego obiektu traktujemy jako abuse@ (jeśli są maile)
+            if isinstance(email, list):
+                for e in email:
+                    if e:
+                        abuse_emails.add(str(e))
+            elif email:
+                abuse_emails.add(str(email))
+
+    return {
+        "ip": first_ip,
+        "inet": inet_info,
+        "phones": sorted(phones),
+        "addresses": sorted(addresses),
+        "abuse_emails": sorted(abuse_emails),
+        "all_emails": sorted(emails),
+    }
+
+
 def check_host_request(check_type: str, host: str, max_nodes: int = 5) -> dict:
     """
     Wykonuje zdalny test przez check-host.net (ping/http/tcp/dns/udp).
@@ -304,7 +450,6 @@ def check_host_request(check_type: str, host: str, max_nodes: int = 5) -> dict:
         if not request_id:
             return {"error": "check-host: brak request_id", "raw": data}
 
-        # Polling wyników – kilka prób z opóźnieniem
         result_url = f"https://check-host.net/check-result/{request_id}"
         results = None
         for _ in range(8):
@@ -576,34 +721,29 @@ def analyze_domain(domain: str,
         "ips": [],
         "archives": {},
         "shodan": {},
+        "ip_whois": {},
         "check_host": {},
         "summary": {},
         "risk": {}
     }
 
-    # DNS
     report["dns"] = dns_lookup(normalized)
-
-    # WHOIS
     report["whois"] = whois_lookup(normalized)
-
-    # HTTP
     report["http"] = http_check(normalized)
 
-    # IP
     ips = sorted(set(report["dns"].get("A", []) + report["dns"].get("AAAA", [])))
     report["ips"] = ips
 
-    # Archiwa
     report["archives"]["wayback"] = check_wayback_archive(normalized)
     report["archives"]["google_cache"] = check_google_cache(normalized)
 
-    # Shodan
+    if IPWhois is not None and ips:
+        report["ip_whois"] = ip_whois_lookup(ips[0])
+
     if shodan_api_key and ips:
         for ip in ips:
             report["shodan"][ip] = shodan_lookup(ip, shodan_api_key)
 
-    # check-host
     if use_check_host:
         report["check_host"]["ping"] = check_host_request("ping", normalized, check_host_max_nodes)
         report["check_host"]["http"] = check_host_request("http", normalized, check_host_max_nodes)
@@ -655,8 +795,6 @@ def analyze_domain(domain: str,
             risk_notes.append("Wykonano zdalne testy ping/HTTP z wielu lokalizacji (check-host.net).")
 
     report["summary"]["notes"] = risk_notes
-
-    # Scoring
     report["risk"] = compute_risk(report)
 
     return report
@@ -787,11 +925,11 @@ def format_report(report: dict) -> str:
     lines.append("2. Analiza DNS")
     lines.append("----------------")
     lines.append("2.1. Wybrane typy rekordów DNS:")
-    lines.append("  - A    – adres IPv4 przypisany do domeny (hosta).")
-    lines.append("  - AAAA – adres IPv6 przypisany do domeny (hosta).")
-    lines.append("  - MX   – serwery pocztowe obsługujące pocztę dla domeny.")
+    lines.append("  - A    – rekord adresu IPv4 przypisany do nazwy hosta.")
+    lines.append("  - AAAA – rekord adresu IPv6 przypisany do nazwy hosta.")
+    lines.append("  - MX   – rekord pocztowy; wskazuje serwery przyjmujące pocztę (SMTP) dla domeny.")
     lines.append("  - NS   – serwery nazw (Name Server) odpowiedzialne za strefę DNS domeny.")
-    lines.append("  - TXT  – rekordy tekstowe (np. SPF, DMARC, inne informacje kontrolne).")
+    lines.append("  - TXT  – rekordy tekstowe; często zawierają SPF, DKIM, DMARC, klucze, metadane.")
     lines.append("")
     dns_data = report.get("dns", {})
     for rtype in ("A", "AAAA", "MX", "NS", "TXT"):
@@ -808,9 +946,9 @@ def format_report(report: dict) -> str:
             lines.append(f"     - {e}")
     lines.append("")
 
-    # 3. WHOIS
-    lines.append("3. Dane rejestracyjne WHOIS")
-    lines.append("--------------------------------")
+    # 3. WHOIS domeny
+    lines.append("3. Dane rejestracyjne WHOIS (domena)")
+    lines.append("--------------------------------------")
     lines.append("WHOIS – protokół i baza danych przechowująca informacje o rejestracji domeny.")
     lines.append("")
     who = report.get("whois", {})
@@ -819,10 +957,11 @@ def format_report(report: dict) -> str:
     else:
         lines.append(f"3.1. Nazwa domeny w WHOIS: {who.get('domain_name')}")
         lines.append(f"3.2. Rejestrator: {who.get('registrar')}")
-        lines.append(f"3.3. Data rejestracji: {who.get('creation_date')}")
-        lines.append(f"3.4. Data wygaśnięcia: {who.get('expiration_date')}")
-        lines.append(f"3.5. Serwery nazw (NS): {who.get('name_servers')}")
-        lines.append(f"3.6. Adresy e-mail w WHOIS: {who.get('emails')}")
+        lines.append(f"3.3. Data rejestracji (creation_date): {who.get('creation_date')}")
+        lines.append(f"3.4. Data wygaśnięcia (expiration_date): {who.get('expiration_date')}")
+        lines.append(f"3.5. Data ostatniej modyfikacji (updated_date): {who.get('updated_date')}")
+        lines.append(f"3.6. Serwery nazw (NS): {who.get('name_servers')}")
+        lines.append(f"3.7. Adresy e-mail w WHOIS (jeśli raportowane): {who.get('emails')}")
     lines.append("")
 
     # 4. HTTP/HTTPS i testy zewnętrzne
@@ -856,32 +995,63 @@ def format_report(report: dict) -> str:
         lines.extend(format_check_host_http(http_data))
     lines.append("")
 
-    # 5. Infrastruktura IP i Shodan
-    lines.append("5. Infrastruktura IP i dane z Shodan")
-    lines.append("----------------------------------------")
-    lines.append("Shodan – wyszukiwarka urządzeń i usług w Internecie.")
+    # 5. Infrastruktura IP: IP WHOIS + Shodan
+    lines.append("5. Infrastruktura IP: IP/Network WHOIS oraz Shodan")
+    lines.append("---------------------------------------------------")
+
+    ipw = report.get("ip_whois", {})
+    if not ipw:
+        lines.append("5.1. IP/Network WHOIS (inetnum): brak danych (brak biblioteki ipwhois lub brak IP).")
+    elif "error" in ipw:
+        lines.append(f"5.1. IP/Network WHOIS (inetnum): {ipw['error']}")
+    else:
+        inet = ipw.get("inet", {})
+        lines.append(f"5.1. IP/Network WHOIS dla IP: {ipw.get('ip')}")
+        lines.append(f"     - Zakres (inetnum/cidr): {inet.get('cidr') or (inet.get('start_address'), inet.get('end_address'))}")
+        lines.append(f"     - Nazwa/organizacja sieci: {inet.get('name')}")
+        lines.append(f"     - Kraj (RIR): {inet.get('country')}")
+        lines.append(f"     - Uwagi/remarks: {inet.get('remarks')}")
+        if ipw.get("addresses"):
+            lines.append("     - Adresy powiązane (z Network WHOIS):")
+            for a in ipw["addresses"]:
+                lines.append(f"         * {a}")
+        if ipw.get("phones"):
+            lines.append("     - Numery telefonów (bez duplikatów):")
+            for p in ipw["phones"]:
+                lines.append(f"         * {p}")
+        if ipw.get("abuse_emails"):
+            lines.append("     - Adresy typu abuse@ (kontakt ds. nadużyć):")
+            for e in ipw["abuse_emails"]:
+                lines.append(f"         * {e}")
+        if ipw.get("all_emails"):
+            lines.append("     - Inne adresy e-mail z Network WHOIS:")
+            for e in ipw["all_emails"]:
+                if e not in ipw.get("abuse_emails", []):
+                    lines.append(f"         * {e}")
+
     lines.append("")
+    lines.append("5.2. Dane z Shodan (powierzchnia usług widocznych z Internetu):")
     shodan_data = report.get("shodan", {})
     if not shodan_data:
-        lines.append("5.1. Shodan nie był użyty lub nie zwrócił danych.")
+        lines.append("     Brak danych z Shodan (nie użyto API lub brak wyników).")
     else:
         for ip, info in shodan_data.items():
-            lines.append(f"5.2. IP: {ip}")
+            lines.append(f"     IP: {ip}")
             if not isinstance(info, dict):
-                lines.append(f"     - Nieoczekiwany format danych Shodan: {info}")
+                lines.append(f"       - Nieoczekiwany format danych Shodan: {info}")
                 continue
             if "error" in info:
-                lines.append(f"     - Błąd / informacja: {info['error']}")
+                lines.append(f"       - Błąd / informacja: {info['error']}")
                 continue
             if "info" in info:
-                lines.append(f"     - Informacja: {info['info']}")
-            lines.append(f"     - Organizacja / ISP: {info.get('org') or info.get('isp')}")
-            lines.append(f"     - System operacyjny (jeśli wykryto): {info.get('os')}")
+                lines.append(f"       - Informacja: {info['info']}")
+            lines.append(f"       - Organizacja / ISP: {info.get('org') or info.get('isp')}")
+            lines.append(f"       - System operacyjny (jeśli wykryto): {info.get('os')}")
             ports = info.get("ports") or []
             if ports:
-                lines.append(f"     - Otwarte porty według Shodan: {sorted(ports)}")
+                lines.append(f"       - Otwarte porty według Shodan: {sorted(ports)}")
             else:
-                lines.append("     - Brak informacji o otwartych portach w Shodan.")
+                lines.append("       - Brak informacji o otwartych portach w Shodan.")
     lines.append("")
 
     # 6. Archiwa
@@ -890,26 +1060,30 @@ def format_report(report: dict) -> str:
     archives = report.get("archives", {})
     wayback = archives.get("wayback", {})
     google_cache = archives.get("google_cache", {})
+
+    lines.append("6.1. Wayback Machine (Internet Archive):")
     if wayback.get("available"):
-        lines.append("6.1. Wayback Machine:")
-        lines.append(f"     - Archiwum dostępne: TAK")
-        lines.append(f"     - Ostatnia znana kopia (timestamp): {wayback.get('timestamp')}")
-        lines.append(f"     - URL archiwum: {wayback.get('archive_url')}")
+        lines.append("     - Archiwalne kopie: TAK")
+        lines.append(f"     - Pierwsza znana kopia (timestamp): {wayback.get('first_timestamp')}")
+        lines.append(f"       URL: {wayback.get('first_url')}")
+        lines.append(f"     - Ostatnia znana kopia (timestamp): {wayback.get('last_timestamp')}")
+        lines.append(f"       URL: {wayback.get('last_url')}")
     elif "error" in wayback:
-        lines.append(f"6.1. Wayback Machine: błąd – {wayback['error']}")
+        lines.append(f"     - Błąd podczas zapytań do Wayback: {wayback['error']}")
     else:
-        lines.append("6.1. Wayback Machine: brak informacji o archiwalnych kopiach.")
+        lines.append("     - Brak informacji o archiwalnych kopiach (status: brak danych).")
+
+    lines.append("")
+    lines.append("6.2. Google Cache:")
     if google_cache.get("cached") is True:
-        lines.append("6.2. Google Cache:")
         lines.append(f"     - Kopia w Google Cache: TAK (status {google_cache.get('status')})")
-        lines.append(f"     - URL cache: {google_cache.get('cache_url')}")
+        lines.append(f"       URL cache: {google_cache.get('cache_url')}")
     elif google_cache.get("cached") is False:
-        lines.append("6.2. Google Cache:")
         lines.append(f"     - Kopia w Google Cache: NIE (status {google_cache.get('status')})")
     elif "error" in google_cache:
-        lines.append(f"6.2. Google Cache: błąd – {google_cache['error']}")
+        lines.append(f"     - Błąd Google Cache: {google_cache['error']}")
     else:
-        lines.append("6.2. Google Cache: brak jednoznacznej informacji.")
+        lines.append("     - Brak jednoznacznej informacji (status inny niż 200/404/410).")
     lines.append("")
 
     # 7. Scoring ryzyka
@@ -920,9 +1094,25 @@ def format_report(report: dict) -> str:
     level = risk.get("level")
     lines.append(f"7.1. Wynik punktowy (0–100): {score}")
     lines.append(f"7.2. Poziom ryzyka: {level}")
-    lines.append("7.3. Czynniki wpływające na scoring:")
+    lines.append("7.3. Czynniki wpływające na scoring (przykładowy model heurystyczny):")
+    lines.append("     - Punkt wyjścia: 50 punktów.")
+    lines.append("     - Wiek domeny:")
+    lines.append("         * bardzo młoda (<30 dni): -15 pkt")
+    lines.append("         * młoda (<1 rok): -5 pkt")
+    lines.append("         * stara (>5 lat): +5 pkt")
+    lines.append("     - HTTP/HTTPS:")
+    lines.append("         * kod 2xx: +3 pkt, błędy 4xx/5xx: -3 pkt")
+    lines.append("         * użycie HTTPS (TLS): +2 pkt")
+    lines.append("     - Archiwa (Wayback / Google Cache): +1 / +2 pkt za obecność.")
+    lines.append("     - Shodan:")
+    lines.append("         * brak otwartych portów: +1 pkt")
+    lines.append("         * wiele portów / porty administracyjne (SSH/RDP itp.): -2 do -10 pkt")
+    lines.append("     - Testy check-host.net:")
+    lines.append("         * poprawne wykonanie: +1 pkt, błędy: -2 pkt")
+    lines.append("")
+    lines.append("     Szczegółowe uzasadnienia dla bieżącej domeny:")
     for r in risk.get("reasons", []):
-        lines.append(f"     - {r}")
+        lines.append(f"         - {r}")
     lines.append("")
 
     # 8. Wnioski opisowe
@@ -932,38 +1122,40 @@ def format_report(report: dict) -> str:
         lines.append(f"- {note}")
     lines.append("")
 
-    # 9. Legenda
-    lines.append("9. Legenda pojęć")
-    lines.append("-----------------")
-    lines.append("DNS A/AAAA – mapowanie nazwy domenowej na adres IPv4 / IPv6.")
-    lines.append("DNS MX – serwery pocztowe obsługujące pocztę dla domeny.")
-    lines.append("DNS NS – serwery nazw odpowiedzialne za strefę DNS domeny.")
-    lines.append("DNS TXT – rekordy tekstowe (np. SPF/DMARC).")
-    lines.append("WHOIS – rejestr danych o właścicielu/rejestracji domeny.")
-    lines.append("HTTP 2xx – poprawna odpowiedź serwera.")
-    lines.append("HTTP 3xx – przekierowanie.")
-    lines.append("HTTP 4xx/5xx – błąd po stronie klienta/serwera.")
-    lines.append("Shodan – wyszukiwarka urządzeń/portów widocznych z Internetu.")
-    lines.append("check-host.net – zewnętrzne testy ping/HTTP/TCP/DNS z wielu lokalizacji.")
-    lines.append("Scoring 0–39 – Wysokie ryzyko.")
-    lines.append("Scoring 40–69 – Średnie ryzyko.")
-    lines.append("Scoring 70–100 – Niskie ryzyko.")
+    # 9. Legenda pojęć
+    lines.append("9. Legenda pojęć i metodologii")
+    lines.append("--------------------------------")
+    lines.append("DNS A – rekord mapujący nazwę hosta na adres IPv4 (32 bity).")
+    lines.append("DNS AAAA – rekord mapujący nazwę hosta na adres IPv6 (128 bitów).")
+    lines.append("DNS MX – rekord określający serwery pocztowe przyjmujące pocztę dla domeny (priorytet + host).")
+    lines.append("DNS NS – serwery odpowiedzialne za przechowywanie strefy DNS domeny.")
+    lines.append("DNS TXT – dowolny tekst przypisany do domeny; często zawiera SPF, DKIM, DMARC, klucze, metadane.")
+    lines.append("WHOIS domeny – rejestracja nazwy, rejestrator, daty (rejestracji, wygaśnięcia, aktualizacji).")
+    lines.append("IP/Network WHOIS (inetnum) – informacje o alokacji zakresu adresów IP (RIR, operator, abuse@ itd.).")
+    lines.append("Shodan – wyszukiwarka usług i portów widocznych publicznie w Internecie.")
+    lines.append("Wayback Machine – publiczne archiwum kopii stron WWW (migawki w czasie).")
+    lines.append("Google Cache – kopia strony trzymana przez wyszukiwarkę Google.")
+    lines.append("")
+    lines.append("Model scoringu ryzyka w tym narzędziu jest heurystyczny i ma charakter demonstracyjny.")
+    lines.append("Uwzględnia m.in. wiek domeny, stabilność HTTP, użycie HTTPS, obecność w archiwach,")
+    lines.append("ekspozycję usług (Shodan) oraz wyniki z zewnętrznych testów dostępności.")
     lines.append("")
 
     # 10. Źródła
     lines.append("10. Wykaz wykorzystanych źródeł OSINT i narzędzi")
     lines.append("-----------------------------------------------")
     lines.append("- Zapytania DNS (dnspython / socket).")
-    lines.append("- Dane WHOIS (python-whois).")
-    lines.append("- HTTP/HTTPS (requests).")
-    lines.append("- Internet Archive – Wayback Machine (API availability).")
+    lines.append("- Dane WHOIS (python-whois – rejestry domen).")
+    lines.append("- IP/Network WHOIS (ipwhois / RDAP – rejestry RIR: RIPE, ARIN, APNIC, itp.).")
+    lines.append("- HTTP/HTTPS (requests – bezpośrednie zapytania do domeny).")
+    lines.append("- Internet Archive – Wayback Machine (CDX API).")
     lines.append("- Google Cache (webcache.googleusercontent.com).")
     lines.append("- Shodan API (jeśli skonfigurowano klucz API).")
     lines.append("- check-host.net (testy ping/HTTP z wielu lokalizacji).")
     lines.append("")
-    lines.append("Program: OSINT Domain Analyzer, autor: pawlict, licencja MIT \"AS IS\".")
+    lines.append("Program: DomianShadow, autor: pawlict, licencja MIT \"AS IS\".")
     lines.append(f"Wersja programu: {APP_VERSION}")
-    lines.append("Biblioteki: requests, python-whois, dnspython, reportlab, selenium, tkinter itd.")
+    lines.append("Biblioteki: requests, python-whois, dnspython, ipwhois, reportlab, selenium, tkinter itd.")
     lines.append("")
     lines.append(
         "Uwaga: raport ma charakter informacyjny (OSINT) i nie stanowi formalnego audytu "
@@ -980,10 +1172,12 @@ def create_pdf_with_text_and_optional_screenshot(pdf_path: str,
                                                  screenshot_url: Optional[str] = None) -> None:
     """
     Tworzy PDF: jeśli uda się zrobić screenshot – pierwsza strona to zrzut,
-    potem tekst raportu.
+    potem tekst raportu. Używa fontu z obsługą polskich znaków (np. DejaVuSans).
     """
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("Brak biblioteki reportlab.")
+
+    ensure_pdf_font_registered()
 
     c = pdf_canvas.Canvas(pdf_path, pagesize=A4)
     width, height = A4
@@ -996,9 +1190,9 @@ def create_pdf_with_text_and_optional_screenshot(pdf_path: str,
         screenshot_path = os.path.splitext(pdf_path)[0] + "_screenshot.png"
         if capture_screenshot(screenshot_url, screenshot_path):
             try:
-                c.setFont("Helvetica-Bold", 14)
+                c.setFont(PDF_FONT_NAME, 14)
                 c.drawString(margin, height - margin - line_height, "Zrzut ekranu strony (widok główny)")
-                c.setFont("Helvetica", 9)
+                c.setFont(PDF_FONT_NAME, 9)
 
                 img = ImageReader(screenshot_path)
                 iw, ih = img.getSize()
@@ -1014,14 +1208,14 @@ def create_pdf_with_text_and_optional_screenshot(pdf_path: str,
                 print("Błąd wstawiania screenshota do PDF:", e)
 
     # Strony z tekstem
-    c.setFont("Helvetica", 9)
+    c.setFont(PDF_FONT_NAME, 9)
     y = text_top
     for raw_line in text.splitlines():
         if not raw_line:
             y -= line_height
             if y < margin:
                 c.showPage()
-                c.setFont("Helvetica", 9)
+                c.setFont(PDF_FONT_NAME, 9)
                 y = text_top
             continue
         wrapped = textwrap.wrap(raw_line, width=100) or [""]
@@ -1030,7 +1224,7 @@ def create_pdf_with_text_and_optional_screenshot(pdf_path: str,
             y -= line_height
             if y < margin:
                 c.showPage()
-                c.setFont("Helvetica", 9)
+                c.setFont(PDF_FONT_NAME, 9)
                 y = text_top
 
     c.save()
@@ -1041,7 +1235,7 @@ def create_pdf_with_text_and_optional_screenshot(pdf_path: str,
 class DomainOSINTApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("OSINT domeny – prosty analizator")
+        self.title("DomainShadow")
         self.geometry("1100x780")
 
         self.shodan_api_var = tk.StringVar()
@@ -1187,7 +1381,7 @@ class DomainOSINTApp(tk.Tk):
         info_inner = ttk.Frame(self.info_frame)
         info_inner.pack(fill="both", expand=True, padx=10, pady=10)
 
-        title_label = ttk.Label(info_inner, text="OSINT Domain Analyzer", font=("TkDefaultFont", 14, "bold"))
+        title_label = ttk.Label(info_inner, text="DomainShadow", font=("TkDefaultFont", 14, "bold"))
         title_label.pack(anchor="w", pady=(0, 10))
 
         info_lines = [
@@ -1201,9 +1395,10 @@ class DomainOSINTApp(tk.Tk):
             "",
             "Biblioteki:",
             "- requests – zapytania HTTP",
-            "- python-whois – dane WHOIS",
+            "- python-whois – dane WHOIS domeny",
             "- dnspython – zapytania DNS (jeśli dostępne)",
-            "- reportlab – generowanie raportu PDF",
+            "- ipwhois – IP/Network WHOIS (inetnum, abuse@, telefony, adresy)",
+            "- reportlab – generowanie raportu PDF (z obsługą polskich znaków)",
             "- selenium (+ geckodriver) – zrzuty ekranu domeny",
             "- tkinter – interfejs graficzny (GUI)",
             "",
