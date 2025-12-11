@@ -2,7 +2,7 @@
 
 **Advanced OSINT Domain Analyzer & Risk Scorer**
 
-![Version](https://img.shields.io/badge/version-v0.5.0-blue)
+![Version](https://img.shields.io/badge/version-v0.5.1-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-yellow)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
